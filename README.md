@@ -24,8 +24,8 @@ telegram_bot/
     ├── bot.py
     ├── config.py
     ├── database.py
-    └── db/
-        └── bot_database.db
+└── db/
+    ├── bot_database.db
 ```
 
 ## Установка
