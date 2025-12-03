@@ -1,5 +1,6 @@
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.constants import ParseMode
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 from config import BOT_TOKEN
 from .database import Database
 
@@ -10,127 +11,111 @@ class TelegramBot:
         self.setup_handlers()
 
     def setup_handlers(self):
-        """Настройка обработчиков команд"""
-        self.application.add_handler(CommandHandler("start", self.start_command))
-        self.application.add_handler(CommandHandler("add", self.add_command))
+        self.application.add_handler(MessageHandler(filters.StatusUpdate.CHAT_CREATED | filters.StatusUpdate.MIGRATE | filters.StatusUpdate.NEW_CHAT_MEMBERS, self.on_join))
+        
+        from telegram.ext import ChatMemberHandler
+        self.application.add_handler(ChatMemberHandler(self.on_chat_member_update, ChatMemberHandler.MY_CHAT_MEMBER))
+
         self.application.add_handler(CommandHandler("all", self.all_command))
-        self.application.add_handler(CommandHandler("remove", self.remove_command))
-        self.application.add_handler(CommandHandler("list", self.list_command))
+        self.application.add_handler(MessageHandler(filters.Regex(r"^@all$"), self.all_command))
+        
+        self.application.add_handler(MessageHandler(filters.TEXT | filters.StatusUpdate.NEW_CHAT_MEMBERS, self.capture_user))
 
-    async def add_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """
-        Добавление участников в группу
-        Использование: /add @user1 @user2 @user3
-        """
+    async def on_join(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not update.effective_chat.type in ['group', 'supergroup']:
-            await update.message.reply_text("Эта команда работает только в группах!")
+            return
+            
+        for member in update.message.new_chat_members:
+            if member.id == context.bot.id:
+                await update.message.reply_text(
+                    "Привет! 👋\n\n"
+                    "Я бот для уведомления всех участников.\n"
+                    "❗❗ Важно: Чтобы я мог запоминать участников и уведомлять их, "
+                    "сделайте меня администратором группы пж."
+                )
+
+    async def on_chat_member_update(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        result = update.chat_member
+        
+        if result.new_chat_member.status == "administrator":
+            chat_id = update.effective_chat.id
+            
+            try:
+                admins = await context.bot.get_chat_administrators(chat_id)
+                count = 0
+                for admin in admins:
+                    if not admin.user.is_bot:
+                        self.db.register_user(
+                            group_id=chat_id,
+                            user_id=admin.user.id,
+                            username=admin.user.username,
+                            first_name=admin.user.first_name
+                        )
+                        count += 1 
+            except Exception as e:
+                print(f"Error fetching admins: {e}")
+
+
+    async def capture_user(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not update.effective_chat.type in ['group', 'supergroup']:
             return
 
-        if not context.args:
-            await update.message.reply_text(
-                "Пожалуйста, укажите username'ы участников.\n"
-                "Пример: /add @user1 @user2 @user3"
+        user = update.effective_user
+        chat = update.effective_chat
+        
+        if user and not user.is_bot:
+            self.db.register_user(
+                group_id=chat.id,
+                user_id=user.id,
+                username=user.username,
+                first_name=user.first_name
             )
-            return
-
-        chat_id = update.effective_chat.id
-        chat_name = update.effective_chat.title
-
-        self.db.add_group(chat_id, chat_name)
-
-        added, failed = self.db.add_members(chat_id, context.args)
-
-        response = [f"✅ Добавлено участников: {added}"]
-        if failed:
-            response.append(f"❌ Не удалось добавить: {', '.join(failed)}")
-
-        await update.message.reply_text("\n".join(response))
+            
+        if update.message and update.message.new_chat_members:
+            for member in update.message.new_chat_members:
+                if not member.is_bot:
+                    self.db.register_user(
+                        group_id=chat.id,
+                        user_id=member.id,
+                        username=member.username,
+                        first_name=member.first_name
+                    )
 
     async def all_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Отметить всех участников группы"""
         if not update.effective_chat.type in ['group', 'supergroup']:
             await update.message.reply_text("Эта команда работает только в группах!")
             return
 
+        chat_id = update.effective_chat.id
+        
         try:
-            chat_id = update.effective_chat.id
-            sender_username = update.effective_user.username
+            await update.message.delete()
+        except Exception:
+            pass
 
-            # Получаем всех участников из базы
-            members = self.db.get_group_members(chat_id)
-
-            # Исключаем отправителя
-            if sender_username:
-                members_to_mention = members - {sender_username}
-            else:
-                members_to_mention = members
-
-            # Формируем сообщение
-            if members_to_mention:
-                mentions = " ".join(f"@{username}" for username in sorted(members_to_mention))
-                message = f"🔔 {mentions}"
-            else:
-                message = "❌ В базе нет участников для упоминания"
-
-            await update.message.reply_text(message)
-
-        except Exception as e:
-            print(f"Error in all_command: {e}")
-            await update.message.reply_text("Произошла ошибка при отправке сообщения.")
-
-    async def remove_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """
-        Удаление участника из группы
-        Использование: /remove @username
-        """
-        if not update.effective_chat.type in ['group', 'supergroup']:
-            await update.message.reply_text("Эта команда работает только в группах!")
+        users = self.db.get_group_users(chat_id)
+        
+        if not users:
+            msg = await context.bot.send_message(chat_id, "Я пока никого не запомнил. Пусть участники напишут что-нибудь в чат.")
             return
 
-        if not context.args:
-            await update.message.reply_text(
-                "Пожалуйста, укажите username участника.\n"
-                "Пример: /remove @username"
+        mentions = []
+        for user in users:
+            mentions.append(f'<a href="tg://user?id={user["user_id"]}">\u200b</a>')
+
+        chunk_size = 50
+        for i in range(0, len(mentions), chunk_size):
+            chunk = mentions[i:i + chunk_size]
+            hidden_mentions_str = "".join(chunk)
+            
+            text = f"🔔 <b>Внимание всем!</b>{hidden_mentions_str}"
+            
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode=ParseMode.HTML
             )
-            return
-
-        username = context.args[0]
-        chat_id = update.effective_chat.id
-
-        if self.db.remove_member(chat_id, username):
-            await update.message.reply_text(f"✅ Участник {username} удален из базы")
-        else:
-            await update.message.reply_text(f"❌ Не удалось удалить участника {username}")
-
-    async def list_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Показать список всех участников в базе"""
-        if not update.effective_chat.type in ['group', 'supergroup']:
-            await update.message.reply_text("Эта команда работает только в группах!")
-            return
-
-        chat_id = update.effective_chat.id
-        members = self.db.get_group_members(chat_id)
-
-        if members:
-            member_list = "\n".join(f"@{username}" for username in sorted(members))
-            await update.message.reply_text(
-                f"📋 Список участников в базе ({len(members)}):\n{member_list}"
-            )
-        else:
-            await update.message.reply_text("📋 В базе нет участников для этой группы")
-
-    async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработчик команды /start"""
-        await update.message.reply_text(
-            "Привет! Я бот для оповещения всех участников группы.\n\n"
-            "Доступные команды:\n"
-            "/add @user1 @user2 - добавить участников\n"
-            "/remove @user - удалить участника\n"
-            "/all - отметить всех участников\n"
-            "/list - показать список участников"
-        )
 
     def run(self):
-        """Запуск бота"""
         print("Bot starting...")
         self.application.run_polling()

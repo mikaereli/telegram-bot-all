@@ -10,7 +10,6 @@ class Database:
         print(f"Database initialized at {self.db_file}")
 
     def init_database(self):
-        """Инициализация базы данных"""
         conn = sqlite3.connect(self.db_file)
         cursor = conn.cursor()
 
@@ -22,12 +21,14 @@ class Database:
         ''')
 
         cursor.execute('''
-            CREATE TABLE IF NOT EXISTS members (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT NOT NULL,
-                group_id INTEGER,
+            CREATE TABLE IF NOT EXISTS group_members (
+                user_id INTEGER NOT NULL,
+                group_id INTEGER NOT NULL,
+                username TEXT,
+                first_name TEXT,
+                last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (group_id) REFERENCES groups (group_id),
-                UNIQUE(username, group_id)
+                PRIMARY KEY (user_id, group_id)
             )
         ''')
 
@@ -35,7 +36,6 @@ class Database:
         conn.close()
 
     def add_group(self, group_id: int, name: str) -> bool:
-        """Добавление новой группы"""
         try:
             conn = sqlite3.connect(self.db_file)
             cursor = conn.cursor()
@@ -52,54 +52,47 @@ class Database:
             print(f"Error adding group: {e}")
             return False
 
-    def add_members(self, group_id: int, usernames: List[str]) -> Tuple[int, List[str]]:
-        """Добавление участников в группу"""
-        conn = sqlite3.connect(self.db_file)
-        cursor = conn.cursor()
-        added = 0
-        failed = []
-
-        for username in usernames:
-            username = username.lstrip('@')
-            try:
-                cursor.execute('''
-                    INSERT OR REPLACE INTO members (username, group_id)
-                    VALUES (?, ?)
-                ''', (username, group_id))
-                added += 1
-            except Exception as e:
-                print(f"Error adding member {username}: {e}")
-                failed.append(username)
-
-        conn.commit()
-        conn.close()
-        return added, failed
-
-    def get_group_members(self, group_id: int) -> Set[str]:
-        """Получение всех участников группы"""
-        conn = sqlite3.connect(self.db_file)
-        cursor = conn.cursor()
-
-        cursor.execute('''
-            SELECT username FROM members
-            WHERE group_id = ?
-        ''', (group_id,))
-
-        members = {row[0] for row in cursor.fetchall()}
-        conn.close()
-        return members
-
-    def remove_member(self, group_id: int, username: str) -> bool:
-        """Удаление участника из группы"""
+    def register_user(self, group_id: int, user_id: int, username: str, first_name: str):
+        """Register or update a user in a group"""
         try:
             conn = sqlite3.connect(self.db_file)
             cursor = conn.cursor()
 
-            username = username.lstrip('@')
             cursor.execute('''
-                DELETE FROM members
-                WHERE group_id = ? AND username = ?
-            ''', (group_id, username))
+                INSERT OR REPLACE INTO group_members (user_id, group_id, username, first_name, last_seen)
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ''', (user_id, group_id, username, first_name))
+
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"Error registering user {user_id}: {e}")
+
+    def get_group_users(self, group_id: int) -> List[dict]:
+        """Get all users for a group"""
+        conn = sqlite3.connect(self.db_file)
+        conn.row_factory = sqlite3.Row  
+        cursor = conn.cursor()
+
+        cursor.execute('''
+            SELECT user_id, username, first_name FROM group_members
+            WHERE group_id = ?
+        ''', (group_id,))
+
+        users = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        return users
+
+    # Legacy methods below might be removed or updated if needed
+    def remove_member(self, group_id: int, user_id: int) -> bool:
+        try:
+            conn = sqlite3.connect(self.db_file)
+            cursor = conn.cursor()
+
+            cursor.execute('''
+                DELETE FROM group_members
+                WHERE group_id = ? AND user_id = ?
+            ''', (group_id, user_id))
 
             conn.commit()
             conn.close()
